@@ -1,0 +1,136 @@
+sudo apt update && sudo apt upgrade -y
+sudo add-apt-repository ppa:certbot/certbot
+sudo apt install -y python3-dev python3-venv nginx curl git ufw python3-certbot-nginx
+
+sudo groupadd --system webapps
+sudo useradd --system --gid webapps --shell /bin/bash --home /srv/sd-bot svc_sd-bot
+sudo mkdir -p /srv/sd-bot/logs
+sudo chown svc_sd-bot /srv/sd-bot
+sudo su - svc_sd-bot
+python3 -m venv venv
+. venv/bin/activate
+pip install -U pip setuptools
+git clone <ссылка на репозиторий>
+pip install -r requirements.txt
+pip install gunicorn
+nano .env    #создаем файл переменных среды, в нес прописываем следующее
+    TELEGRAM_TOKEN=<токен вашего бота>
+    SD_API_LOGIN=help_bot
+    SD_API_PASSWORD=HSbnm435555
+    SD_API_URL=http://help.re-store.ru
+
+echo "export FLASK_APP=sd-bot.py" >> ~/.profile
+sudo chown -R svc_sd-bot:users /srv/sd-bot
+sudo chmod -R g+w /srv/sd-bot
+sudo usermod -a -G users `whoami`
+
+#Настраиваем app-сервер
+nano venv/bin/gunicorn_start         # создаем скрипт запуска  gunicorn, поместите в него текст ниже
+
+    #!/bin/bash
+
+    NAME="sd-bot"                                     # Name of the application
+    APPDIR=/srv/sd-bot                                # project directory
+    SOCKFILE=/srv/sd-bot/run/sd-bot.sock              # we will communicte using this unix socket
+    USER=svc_sd-bot                                   # the user to run as
+    GROUP=webapps                                     # the group to run as
+    NUM_WORKERS=3                                     # how many worker processes should Gunicorn spawn
+
+    WSGI_MODULE=sd-bot.py                            # WSGI module name
+
+    echo "Starting $NAME as `whoami`"
+
+    # Activate the virtual environment
+    cd $APPDIR
+    source venv/bin/activate
+    # export DJANGO_SETTINGS_MODULE=$DJANGO_SETTINGS_MODULE
+    export PYTHONPATH=$APPDIR:$PYTHONPATH
+
+    # Create the run directory if it doesn't exist
+    RUNDIR=$(dirname $SOCKFILE)
+    test -d $RUNDIR || mkdir -p $RUNDIR
+
+    # Start your gUnicorn
+    # Programs meant to be run under supervisor should not daemonize themselves (do not use --daemon)
+    exec venv/bin/gunicorn ${WSGI_MODULE}:application \
+      --name $NAME \
+      --workers $NUM_WORKERS \
+      --user=$USER --group=$GROUP \
+      --bind=unix:$SOCKFILE \
+      --log-level=debug \
+      --log-file=-
+
+#Создаем скрипт запуска демона app-сервера
+sudo nano /etc/systemd/system/sd-bot.service
+
+# сюда вписываем следующий конфиг
+    [Unit]
+    Description=daemon of gunicorn for sd-bot
+    After=network.target
+    stdout_logfile = /srv/sd-bot/logs/gunicorn.log
+    redirect_stderr = true
+
+    [Service]
+    User=svc_sd-bot
+    Group=webapps
+    WorkingDirectory=/srv/sd-bot
+    ExecStart=/srv/sd-bot/venv/bin/gunicorn_start
+
+    [Install]
+    WantedBy=multi-user.target
+
+
+
+chmod u+x venv/bin/gunicorn_start
+touch /srv/sd-bot/logs/gunicorn.log
+touch /srv/sd-bot/logs/nginx-access.log
+touch /srv/sd-bot/logs/nginx-error.log
+sudo nano /etc/nginx/sites-available/sd-bot
+sudo systemctl start sd-bot
+sudo systemctl enable sd-bot
+
+#Настраиваем nginx
+sudo systemctl start nginx
+sudo systemctl enable nginx
+sudo nano /etc/nginx/sites-available/sd-bot
+    # Создаём следующий конфиг
+    upstream sd-bot_app_server {
+  server unix:/srv/sd-bot/run/sd-bot.sock fail_timeout=0;
+}
+    server {
+
+    listen   80;
+    server_name <СЮДА ВПИШИТЕ ИМЯ ДОМЕНА>;
+
+
+    access_log /webapps/hello_django/logs/nginx-access.log;
+    error_log /webapps/hello_django/logs/nginx-error.log;
+
+    location /static/ {
+        alias   /webapps/hello_django/static/;
+    }
+
+    location /media/ {
+        alias   /webapps/hello_django/media/;
+    }
+
+    location / {
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Host $http_host;
+        proxy_redirect off;
+
+        if (!-f $request_filename) {
+            proxy_pass http://sd-bot_app_server;
+            break;
+        }
+    }
+
+sudo nginx -t
+sudo ln -s /etc/nginx/sites-available/sd-bot /etc/nginx/sites-enabled/sd-bot
+sudo systemctl restart nginx
+
+# Настраиваем TLS
+sudo certbot --nginx -d <СЮДА ВПИШИТЕ ИМЯ ВАШЕГО ДОМЕНА> -d <(необязательно)СЮДА ВПИШИТЕ ИМЯ ВАШЕГО ДОМЕНА с префиксом www>
+
+sudo certbot renew --dry-run
+
